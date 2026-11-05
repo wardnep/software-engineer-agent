@@ -11,6 +11,8 @@ import {
   stat,
 } from "node:fs/promises";
 
+import { access } from "node:fs/promises";
+
 export const MAX_FILE_SIZE = 256 * 1024; // 256 KB
 
 export class SecurityError extends Error {
@@ -139,5 +141,93 @@ export async function resolveReadableFile(
     absolutePath: actualPath,
     relativePath: relative(root, actualPath),
     size: fileStat.size,
+  };
+}
+
+export async function resolveWritableFile(
+  workspaceRoot: string,
+  requestedPath: string,
+) {
+  if (!requestedPath || requestedPath.includes("\0")) {
+    throw new SecurityError("Invalid file path.");
+  }
+
+  if (isAbsolute(requestedPath)) {
+    throw new SecurityError(
+      "Absolute paths are not allowed.",
+    );
+  }
+
+  const root = await realpath(workspaceRoot);
+  const candidate = resolve(root, requestedPath);
+
+  if (!isPathInside(root, candidate)) {
+    throw new SecurityError(
+      "Access denied: path is outside workspace.",
+    );
+  }
+
+  if (isSensitivePath(relative(root, candidate))) {
+    throw new SecurityError(
+      "Access denied: sensitive file.",
+    );
+  }
+
+  // Parent directory must exist and resolve inside workspace.
+  const parentPath = await realpath(
+    resolve(candidate, ".."),
+  );
+
+  if (!isPathInside(root, parentPath)) {
+    throw new SecurityError(
+      "Access denied: parent directory is outside workspace.",
+    );
+  }
+
+  if (isSensitivePath(relative(root, parentPath))) {
+    throw new SecurityError(
+      "Access denied: sensitive directory.",
+    );
+  }
+
+  const filePath = resolve(parentPath, candidate.split(/[\\/]/).at(-1)!);
+
+  if (!isPathInside(root, filePath)) {
+    throw new SecurityError(
+      "Access denied: invalid destination.",
+    );
+  }
+
+  if (isSensitivePath(relative(root, filePath))) {
+    throw new SecurityError(
+      "Access denied: sensitive file.",
+    );
+  }
+
+  try {
+    await access(filePath);
+
+    throw new SecurityError(
+      "File already exists. Use edit_file instead.",
+    );
+  } catch (error: unknown) {
+    if (error instanceof SecurityError) {
+      throw error;
+    }
+
+    if (
+      error instanceof Error &&
+      "code" in error &&
+      error.code === "ENOENT"
+    ) {
+      // File does not exist. This is expected.
+    } else {
+      throw error;
+    }
+  }
+
+  return {
+    absolutePath: filePath,
+    relativePath: relative(root, filePath),
   };
 }
