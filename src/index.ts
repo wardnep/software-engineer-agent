@@ -1,58 +1,110 @@
-
 import "dotenv/config";
 
-import { Agent, run } from "@openai/agents";
+import { readdir } from "node:fs/promises";
+import { isAbsolute, relative, resolve } from "node:path";
 
+import { Agent, run, tool } from "@openai/agents";
+import { z } from "zod";
+
+// Workspace root
+const workspaceRoot = process.cwd();
+
+// Tool: List files
+const listFilesTool = tool({
+  name: "list_files",
+
+  description:
+    "List files and directories inside the project workspace. Use this tool when you need to inspect project structure.",
+
+  parameters: z.object({
+    directory: z
+      .string()
+      .describe("Relative directory path inside the workspace."),
+  }),
+
+  async execute({ directory }) {
+    const targetPath = resolve(workspaceRoot, directory);
+    const relativePath = relative(workspaceRoot, targetPath);
+
+    // Security: prevent accessing outside workspace
+    if (
+      relativePath.startsWith("..") ||
+      isAbsolute(relativePath)
+    ) {
+      return JSON.stringify({
+        error: "Access denied: outside workspace.",
+      });
+    }
+
+    try {
+      const entries = await readdir(targetPath, {
+        withFileTypes: true,
+      });
+
+      return JSON.stringify({
+        directory: relativePath || ".",
+        entries: entries.map((entry) => ({
+          name: entry.name,
+          type: entry.isDirectory()
+            ? "directory"
+            : entry.isFile()
+              ? "file"
+              : entry.isSymbolicLink()
+                ? "symlink"
+                : "other",
+        })),
+      }, null, 2);
+
+    } catch (error: unknown) {
+      return JSON.stringify({
+        error:
+          error instanceof Error
+            ? error.message
+            : "Unknown filesystem error",
+      });
+    }
+  },
+});
+
+// Agent
 const agent = new Agent({
   name: "Software Engineer",
+
   instructions: `
     You are an experienced software engineer.
 
-    You help users:
-    - Understand software architecture
-    - Analyze source code
-    - Debug programming problems
-    - Write clean and maintainable code
+    You can inspect project structure using available tools.
 
-    Always explain your reasoning clearly.
+    When asked about project files or directories,
+    you MUST use the list_files tool.
+
+    Never assume files exist without inspecting them.
+
+    Explain your findings clearly.
   `,
+
   model: "gpt-5.4",
+
+  tools: [listFilesTool],
 });
 
+// Main
 async function main() {
   try {
     const result = await run(
       agent,
-      "Explain what an AI Software Engineer Agent is."
+      "Inspect the src directory using your list_files tool and explain its structure."
     );
 
     console.log("\nAgent Response:\n");
     console.log(result.finalOutput);
 
   } catch (error: unknown) {
-    console.error("\nAgent Execution Failed!\n");
+    console.error("\nAgent Execution Failed!");
 
-    if (error instanceof Error) {
-      const apiError = error as Error & {
-        status?: number;
-        code?: string;
-        type?: string;
-        request_id?: string;
-      };
-
-      console.error({
-        name: apiError.name,
-        message: apiError.message,
-        status: apiError.status,
-        code: apiError.code,
-        type: apiError.type,
-        request_id: apiError.request_id,
-      });
-    } else {
-      console.error("Non-standard error:");
-      console.dir(error, { depth: 3 });
-    }
+    console.dir(error, { depth: 5 });
+    process.exitCode = 1;
   }
 }
 
-main();
+void main();
